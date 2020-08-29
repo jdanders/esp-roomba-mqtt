@@ -150,7 +150,7 @@ bool performCommand(const char *cmdchar) {
     DLOG("Turning off\n");
     roomba.power();
     roombaState.cleaning = false;
-  } else if (cmd == "toggle" || cmd == "start_pause") {
+  } else if (cmd == "toggle" || cmd == "start" || cmd == "start_pause") {
     DLOG("Toggling\n");
     roomba.cover();
     roombaState.cleaning = !roombaState.cleaning;
@@ -173,7 +173,7 @@ bool performCommand(const char *cmdchar) {
     roomba.spot();
   } else if (cmd == "locate") {
     DLOG("Locating\n");
-    // TODO
+    roomba.playSong(0);
   } else if (cmd == "return_to_base") {
     DLOG("Returning to Base\n");
     roombaStop();
@@ -441,6 +441,9 @@ void setup() {
   roomba.start();
   delay(100);
 
+  uint8_t jaws[8] = {31,64,32,64,31,64,32,64};
+  roomba.song(0, jaws, 8);
+
   // Reset stream sensor values
   roomba.stream({}, 0);
   delay(100);
@@ -468,12 +471,18 @@ void sendStatus() {
   DLOG("Reporting packet Distance:%dmm ChargingState:%d Voltage:%dmV Current:%dmA Charge:%dmAh Capacity:%dmAh\n", roombaState.distance, roombaState.chargingState, roombaState.voltage, roombaState.current, roombaState.charge, roombaState.capacity);
   StaticJsonBuffer<200> jsonBuffer;
   JsonObject& root = jsonBuffer.createObject();
+  if (roombaState.cleaning) {
+    root["state"] = "cleaning";
+  } else if (roombaState.docked) {
+    root["state"] = "docked";
+  } else if ( roombaState.chargingState == Roomba::ChargeStateReconditioningCharging
+              || roombaState.chargingState == Roomba::ChargeStateFullCharging
+              || roombaState.chargingState == Roomba::ChargeStateTrickleCharging) {
+    root["state"] = "docked";
+  } else {
+    root["state"] = "idle";
+  }
   root["battery_level"] = (roombaState.charge * 100)/ (roombaState.capacity != 0 ? roombaState.capacity : 2696);
-  root["cleaning"] = roombaState.cleaning;
-  root["docked"] = roombaState.docked;
-  root["charging"] = roombaState.chargingState == Roomba::ChargeStateReconditioningCharging
-  || roombaState.chargingState == Roomba::ChargeStateFullCharging
-  || roombaState.chargingState == Roomba::ChargeStateTrickleCharging;
   root["voltage"] = roombaState.voltage;
   root["current"] = roombaState.current;
   root["charge"] = roombaState.charge;
