@@ -223,11 +223,21 @@ void debugCallback() {
   } else if (cmd == "quit") {
     DLOG("Stopping Roomba\n");
     Serial.write(173);
+  } else if (cmd == "dstart") {
+    Serial.write(128);
+    delay(50);
+    Serial.write(131);
+    delay(50);
+    Serial.write(135);
+    mqttClient.publish("grond/status", "Cleaning");
+  } else if (cmd == "set115200") {
+    roomba.baud(Roomba::Baud115200);
+    DLOG("Set Roomba baud to115200\n");
   } else if (cmd == "rreset") {
     DLOG("Resetting Roomba\n");
     roomba.reset();
   } else if (cmd == "mqtthello") {
-    mqttClient.publish("vacuum/hello", "hello there");
+    mqttClient.publish("grond/hello", "hello there");
   } else if (cmd == "version") {
     const char compile_date[] = __DATE__ " " __TIME__;
     DLOG("Compiled on: %s\n", compile_date);
@@ -427,7 +437,7 @@ void setup() {
   Debug.setCallBackProjectCmds(debugCallback);
   Debug.setSerialEnabled(false);
   #endif
-  
+
   roomba.start();
   delay(100);
 
