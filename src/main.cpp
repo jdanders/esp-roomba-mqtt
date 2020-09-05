@@ -27,6 +27,7 @@ Roomba roomba(&Serial, Roomba::Baud115200);
 // Roomba state
 typedef struct {
   // Sensor values
+  uint8_t dirt;
   int16_t distance;
   uint8_t chargingState;
   uint16_t voltage;
@@ -35,6 +36,7 @@ typedef struct {
   // underflow to ~65000mAh, so I think signed will work better.
   int16_t charge;
   uint16_t capacity;
+  int16_t velocity;
 
   // Derived state
   bool cleaning;
@@ -45,16 +47,19 @@ typedef struct {
 } RoombaState;
 
 RoombaState roombaState = {};
+int16_t total_distance = 0;
 
 // Roomba sensor packet
 uint8_t roombaPacket[100];
 uint8_t sensors[] = {
+  Roomba::SensorDirtDetect, // PID 15, 1 bytes, 0-255, signed
   Roomba::SensorDistance, // PID 19, 2 bytes, mm, signed
   Roomba::SensorChargingState, // PID 21, 1 byte
   Roomba::SensorVoltage, // PID 22, 2 bytes, mV, unsigned
   Roomba::SensorCurrent, // PID 23, 2 bytes, mA, signed
   Roomba::SensorBatteryCharge, // PID 25, 2 bytes, mAh, unsigned
-  Roomba::SensorBatteryCapacity // PID 26, 2 bytes, mAh, unsigned
+  Roomba::SensorBatteryCapacity, // PID 26, 2 bytes, mAh, unsigned
+  Roomba::SensorVelocity // PID 39, 2 bytes, mm/s, signed
 };
 
 // Network setup
@@ -65,6 +70,7 @@ bool OTAStarted;
 PubSubClient mqttClient(wifiClient);
 const PROGMEM char *commandTopic = MQTT_COMMAND_TOPIC;
 const PROGMEM char *statusTopic = MQTT_STATE_TOPIC;
+const PROGMEM char *attributesTopic = MQTT_ATTRIBUTES_TOPIC;
 
 void wakeup() {
 #ifndef ROOMBA_500
@@ -236,6 +242,13 @@ void debugCallback() {
   } else if (cmd == "rreset") {
     DLOG("Resetting Roomba\n");
     roomba.reset();
+  } else if (cmd == "setsong") {
+    uint8_t jaws[8] = {31,64,32,64,31,64,32,64};
+    roomba.song(0, jaws, 8);
+    DLOG("Roomba can sing\n");
+  } else if (cmd == "playsong") {
+    DLOG("Singing song\n");
+    roomba.playSong(0);
   } else if (cmd == "mqtthello") {
     mqttClient.publish("grond/hello", "hello there");
   } else if (cmd == "version") {
@@ -331,8 +344,13 @@ bool parseRoombaStateFromStreamPacket(uint8_t *packet, int length, RoombaState *
       case Roomba::SensorVirtualWall: // 13
         i += 2;
         break;
+      case Roomba::SensorDirtDetect: // 15
+        state->dirt = packet[i+1];
+        i += 2;
+        break;
       case Roomba::SensorDistance: // 19
         state->distance = packet[i+1] * 256 + packet[i+2];
+        total_distance += state->distance;
         i += 3;
         break;
       case Roomba::SensorChargingState: // 21
@@ -353,6 +371,10 @@ bool parseRoombaStateFromStreamPacket(uint8_t *packet, int length, RoombaState *
         break;
       case Roomba::SensorBatteryCapacity: //26
         state->capacity = packet[i+1] * 256 + packet[i+2];
+        i += 3;
+        break;
+      case Roomba::SensorVelocity: //39
+        state->velocity = packet[i+1] * 256 + packet[i+2];
         i += 3;
         break;
       case Roomba::SensorBumpsAndWheelDrops: // 7
@@ -387,7 +409,7 @@ void readSensorPacket() {
     verboseLogPacket(roombaPacket, packetLength);
     if (parsed) {
       roombaState = rs;
-      VLOG("Got Packet of len=%d! Distance:%dmm ChargingState:%d Voltage:%dmV Current:%dmA Charge:%dmAh Capacity:%dmAh\n", packetLength, roombaState.distance, roombaState.chargingState, roombaState.voltage, roombaState.current, roombaState.charge, roombaState.capacity);
+      VLOG("Got Packet of len=%d! Dirt:%d Distance:%dmm ChargingState:%d Voltage:%dmV Current:%dmA Charge:%dmAh Capacity:%dmAh TotalDistance:%dmm\n", packetLength, roombaState.dirt, roombaState.distance, roombaState.chargingState, roombaState.voltage, roombaState.current, roombaState.charge, roombaState.capacity, total_distance);
       roombaState.cleaning = false;
       roombaState.docked = false;
       if (roombaState.current < -400) {
@@ -463,6 +485,10 @@ void reconnect() {
   }
 }
 
+int now_battery = 0;
+int last_battery = 0;
+int last_current = 0;
+RoombaState lastState = {};
 void sendStatus() {
   if (!mqttClient.connected()) {
     DLOG("MQTT Disconnected, not sending status\n");
@@ -471,24 +497,52 @@ void sendStatus() {
   DLOG("Reporting packet Distance:%dmm ChargingState:%d Voltage:%dmV Current:%dmA Charge:%dmAh Capacity:%dmAh\n", roombaState.distance, roombaState.chargingState, roombaState.voltage, roombaState.current, roombaState.charge, roombaState.capacity);
   StaticJsonBuffer<200> jsonBuffer;
   JsonObject& root = jsonBuffer.createObject();
+  now_battery = (roombaState.charge * 100)/ (roombaState.capacity != 0
+                                             ? roombaState.capacity : 2696);
   if (roombaState.cleaning) {
     root["state"] = "cleaning";
+    if (!lastState.cleaning) total_distance = 0;
+  } else if (roombaState.chargingState == Roomba::ChargeStateFullCharging) {
+    root["state"] = "returning";
   } else if (roombaState.docked) {
     root["state"] = "docked";
   } else if ( roombaState.chargingState == Roomba::ChargeStateReconditioningCharging
-              || roombaState.chargingState == Roomba::ChargeStateFullCharging
               || roombaState.chargingState == Roomba::ChargeStateTrickleCharging) {
     root["state"] = "docked";
   } else {
     root["state"] = "idle";
   }
-  root["battery_level"] = (roombaState.charge * 100)/ (roombaState.capacity != 0 ? roombaState.capacity : 2696);
-  root["voltage"] = roombaState.voltage;
-  root["current"] = roombaState.current;
-  root["charge"] = roombaState.charge;
-  String jsonStr;
-  root.printTo(jsonStr);
-  mqttClient.publish(statusTopic, jsonStr.c_str());
+  root["battery_level"] = now_battery;
+  if ((last_battery != now_battery) ||
+      // Absolute change in current of at least 200
+      (last_current - roombaState.current > 200) ||
+      (roombaState.current - last_current > 200) ||
+      (lastState.cleaning != roombaState.cleaning) ||
+      (lastState.chargingState != roombaState.chargingState) ||
+      (lastState.docked != roombaState.docked))
+  {
+    String jsonStr;
+    root.printTo(jsonStr);
+    mqttClient.publish(statusTopic, jsonStr.c_str());
+    JsonObject& attr = jsonBuffer.createObject();
+    attr["dirt"] = roombaState.dirt;
+    attr["voltage"] = roombaState.voltage;
+    attr["current"] = roombaState.current;
+    attr["charge"] = roombaState.charge;
+    attr["distance"] = roombaState.distance;
+    attr["total_distance"] = total_distance;
+    attr["chargingState"] = roombaState.chargingState;
+    attr["capacity"] = roombaState.capacity;
+    attr["velocity"] = roombaState.velocity;
+    String jsonStr2;
+    attr.printTo(jsonStr2);
+    mqttClient.publish(attributesTopic, jsonStr2.c_str());
+  }
+  last_battery = now_battery;
+  last_current = roombaState.current;
+  lastState.cleaning = roombaState.cleaning;
+  lastState.chargingState = roombaState.chargingState;
+  lastState.docked = roombaState.docked;
 }
 
 long lastStateMsgTime = 0;

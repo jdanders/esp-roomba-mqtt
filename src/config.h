@@ -14,3 +14,4 @@
 #define MQTT_USER "mqttuser"
 #define MQTT_COMMAND_TOPIC "grond/command"
 #define MQTT_STATE_TOPIC "grond/state"
+#define MQTT_ATTRIBUTES_TOPIC "grond/attributes"
