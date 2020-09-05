@@ -48,6 +48,7 @@ typedef struct {
 
 RoombaState roombaState = {};
 int16_t total_distance = 0;
+int lastSong = 0;
 
 // Roomba sensor packet
 uint8_t roombaPacket[100];
@@ -71,6 +72,22 @@ PubSubClient mqttClient(wifiClient);
 const PROGMEM char *commandTopic = MQTT_COMMAND_TOPIC;
 const PROGMEM char *statusTopic = MQTT_STATE_TOPIC;
 const PROGMEM char *attributesTopic = MQTT_ATTRIBUTES_TOPIC;
+
+void set_the_song() {
+  //uint8_t jaws[16] = {52,32,53,32,52,32,53,32,52,32,53,32,52,32,53,32};
+  //roomba.start();
+  //delay(50);
+  //roomba.song(0, jaws, 16);
+  // LotR thirds:
+  // f d e c d Bb c a
+  uint8_t dur = 32;
+  uint8_t lotr[32] =
+    {53, dur, 50, dur, 52, dur, 48, dur, 50, dur, 46, dur, 48, dur, 45, dur,
+     53, dur, 50, dur, 52, dur, 48, dur, 50, dur, 46, dur, 48, dur, 45, dur};
+  roomba.start();
+  delay(50);
+  roomba.song(0, lotr, 32);
+}
 
 void wakeup() {
 #ifndef ROOMBA_500
@@ -103,6 +120,7 @@ void wakeup() {
     delay(200);
   }
   #endif
+  set_the_song();
 }
 
 void wakeOnDock() {
@@ -179,7 +197,10 @@ bool performCommand(const char *cmdchar) {
     roomba.spot();
   } else if (cmd == "locate") {
     DLOG("Locating\n");
+    roomba.safeMode();
+    delay(50);
     roomba.playSong(0);
+    lastSong = millis();
   } else if (cmd == "return_to_base") {
     DLOG("Returning to Base\n");
     roombaStop();
@@ -238,17 +259,37 @@ void debugCallback() {
     mqttClient.publish("grond/status", "Cleaning");
   } else if (cmd == "set115200") {
     roomba.baud(Roomba::Baud115200);
-    DLOG("Set Roomba baud to115200\n");
+    DLOG("Set Roomba baud to 115200\n");
   } else if (cmd == "rreset") {
     DLOG("Resetting Roomba\n");
     roomba.reset();
   } else if (cmd == "setsong") {
-    uint8_t jaws[8] = {31,64,32,64,31,64,32,64};
-    roomba.song(0, jaws, 8);
+    uint8_t jaws[16] = {40,32,41,32,40,32,41,32,40,32,41,32,40,32,41,32};
+    roomba.safeMode();
+    delay(50);
+    roomba.song(0, jaws, 16);
+    DLOG("Roomba can sing\n");
+  } else if (cmd == "setsong1") {
+    uint8_t jaws[16] = {52,32,53,32,52,32,53,32,52,32,53,32,52,32,53,32};
+    roomba.start();
+    delay(50);
+    roomba.song(0, jaws, 16);
+    DLOG("Roomba can sing\n");
+  } else if (cmd == "setsong2") {
+    uint8_t dur = 32;
+    uint8_t lotr[32] =
+      {53, dur, 50, dur, 52, dur, 48, dur, 50, dur, 46, dur, 48, dur, 45, dur,
+       53, dur, 50, dur, 52, dur, 48, dur, 50, dur, 46, dur, 48, dur, 45, dur};
+    roomba.start();
+    delay(50);
+    roomba.song(0, lotr, 32);
     DLOG("Roomba can sing\n");
   } else if (cmd == "playsong") {
     DLOG("Singing song\n");
+    roomba.safeMode();
+    delay(50);
     roomba.playSong(0);
+    lastSong = millis();
   } else if (cmd == "mqtthello") {
     mqttClient.publish("grond/hello", "hello there");
   } else if (cmd == "version") {
@@ -409,7 +450,7 @@ void readSensorPacket() {
     verboseLogPacket(roombaPacket, packetLength);
     if (parsed) {
       roombaState = rs;
-      VLOG("Got Packet of len=%d! Dirt:%d Distance:%dmm ChargingState:%d Voltage:%dmV Current:%dmA Charge:%dmAh Capacity:%dmAh TotalDistance:%dmm\n", packetLength, roombaState.dirt, roombaState.distance, roombaState.chargingState, roombaState.voltage, roombaState.current, roombaState.charge, roombaState.capacity, total_distance);
+      VLOG("Got Packet of len=%d! Dirt:%d Distance:%dmm Velocity:%dmm/s ChargingState:%d Voltage:%dmV Current:%dmA Charge:%dmAh Capacity:%dmAh TotalDistance:%dmm\n", packetLength, roombaState.dirt, roombaState.distance, roombaState.velocity, roombaState.chargingState, roombaState.voltage, roombaState.current, roombaState.charge, roombaState.capacity, total_distance);
       roombaState.cleaning = false;
       roombaState.docked = false;
       if (roombaState.current < -400) {
@@ -463,13 +504,12 @@ void setup() {
   roomba.start();
   delay(100);
 
-  uint8_t jaws[8] = {31,64,32,64,31,64,32,64};
-  roomba.song(0, jaws, 8);
-
   // Reset stream sensor values
   roomba.stream({}, 0);
   delay(100);
 
+  delay(1000);
+  set_the_song();
   // Request sensor stream
   roomba.stream(sensors, sizeof(sensors));
 }
@@ -531,7 +571,36 @@ void sendStatus() {
     attr["charge"] = roombaState.charge;
     attr["distance"] = roombaState.distance;
     attr["total_distance"] = total_distance;
-    attr["chargingState"] = roombaState.chargingState;
+    switch(roombaState.chargingState) {
+      case Roomba::ChargeStateNotCharging: // 0
+        attr["chargingState"] = "Not Charging";
+        break;
+
+      case Roomba::ChargeStateReconditioningCharging: // 0
+        attr["chargingState"] = "Recondition Charging";
+        break;
+
+      case Roomba::ChargeStateFullCharging: // 0
+        attr["chargingState"] = "Full Charging";
+        break;
+
+      case Roomba::ChargeStateTrickleCharging: // 0
+        attr["chargingState"] = "Trickle Charging";
+        break;
+
+      case Roomba::ChargeStateWaiting: // 0
+        attr["chargingState"] = "Waiting";
+        break;
+
+      case Roomba::ChargeStateFault: // 0
+        attr["chargingState"] = "Charging Fault";
+        break;
+
+      default:
+        VLOG("Unhandled Charging State %d\n", roombaState.chargingState);
+        attr["chargingState"] = "Unknown";
+        break;
+    }
     attr["capacity"] = roombaState.capacity;
     attr["velocity"] = roombaState.velocity;
     String jsonStr2;
@@ -572,6 +641,11 @@ void loop() {
     DLOG("Reconnecting MQTT\n");
     lastConnectTime = now;
     reconnect();
+  }
+  // Check after singing
+  if (lastSong > 0 && now - lastSong > 17000) {
+    roomba.start();
+    lastSong = 0;
   }
   // Wakeup the roomba at fixed intervals
   if (now - lastWakeupTime > wakeupInterval) {
